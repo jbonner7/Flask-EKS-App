@@ -1,0 +1,103 @@
+# k8s_manifests/2-deployment.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flask-report-deployment
+  namespace: flask-app
+  labels:
+    app: flask-report
+  annotations:
+    checkov.io/skip: "CKV_K8S_6=NetworkPolicy is handled externally."
+    checkov.io/skip: "CKV_SECRET_6=False positive on annotation."
+   
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flask-report
+  template:
+    metadata:
+      labels:
+        app: flask-report
+    spec:
+      # Pod-level settings
+      serviceAccountName: flask-auth-sa
+      automountServiceAccountToken: false 
+      
+      securityContext:
+        fsGroup: 10001
+      
+      containers:
+      - name: flask-report-app
+        image: "" # <--- Use Digest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 5000
+
+        # --- CONSOLIDATED SECURITY CONTEXT ---
+        securityContext:
+          runAsUser: 10001 
+          runAsGroup: 10001
+          runAsNonRoot: true
+          readOnlyRootFilesystem: false # Must be false for the copy fix
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          seccompProfile:
+            type: RuntimeDefault
+
+        # --- CONSOLIDATED VOLUME MOUNTS ---
+        volumeMounts:
+        - name: secrets-store-inline
+          mountPath: "/mnt/secrets/flask-auth-creds"
+          readOnly: true
+        - name: tmp-volume 
+          mountPath: "/tmp"
+        - name: scan-data 
+          mountPath: "/app/scan_file" # Writable volume for the report
+
+        # --- RESOURCES AND PROBES ---
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+            
+        livenessProbe:
+          httpGet:
+            path: /health 
+            port: 5000
+          initialDelaySeconds: 15
+          periodSeconds: 20
+
+        readinessProbe:
+          httpGet:
+            path: /health 
+            port: 5000
+          initialDelaySeconds: 5  
+          periodSeconds: 10
+          failureThreshold: 3     
+
+        # --- ENVIRONMENT VARIABLES ---
+        env:
+        - name: FLASK_USER
+          value: /mnt/secrets/flask-auth-creds/username 
+        - name: FLASK_PASSWORD_HASH
+          value: /mnt/secrets/flask-auth-creds/password_hash
+
+      # --- POD LEVEL VOLUME DEFINITIONS ---
+      volumes:
+      - name: secrets-store-inline
+        csi:
+          driver: secrets-store.csi.k8s.io
+          readOnly: true
+          volumeAttributes:
+            secretProviderClass: "flask-auth-creds"
+      - name: tmp-volume 
+        emptyDir: {}
+      - name: scan-data
+        emptyDir: {}

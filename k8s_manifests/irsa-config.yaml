@@ -1,0 +1,33 @@
+# k8s_manifests/1-irsa-config.yaml
+
+# --- Kubernetes Service Account with IRSA Annotation ---
+#apiVersion: v1
+#kind: ServiceAccount
+#metadata:
+#  name: flask-auth-sa
+#  namespace: flask-app
+#  annotations:
+#    # 💡 IMPORTANT: Replace this ARN with the Role ARN created by eksctl
+#    eks.amazonaws.com/role-arn: <IRSA_ROLE_ARN_PLACEHOLDER> 
+
+---
+
+# --- Secret Provider Class for CSI Driver ---
+# This defines the AWS Secret Manager details and tells the CSI driver 
+# how to mount the secret data into the pod's filesystem.
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: flask-auth-creds
+  namespace: flask-app
+spec:
+  provider: aws
+  parameters:
+    objects: |
+      - objectName: FlaskAuthCredentials 
+        objectType: secretsmanager
+        jmesPath:
+          - path: username
+            objectAlias: username
+          - path: password_hash
+            objectAlias: password_hash

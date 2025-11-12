@@ -1,0 +1,258 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to create a VPC, security group, key pair, Ubuntu EC2 instance for Cloud Security Training with SSM access.
+
+Resources:
+
+  # VPC
+  DevVPC:
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      Tags:
+        - Key: Name
+          Value: DevVPC
+
+  # Subnet (Public)
+  DevSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DevVPC
+      CidrBlock: "10.0.100.0/24"
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: "true"
+      Tags:
+        - Key: Name
+          Value: DevSubnet
+
+  # Internet Gateway (to allow internet access)
+  DevInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: DevInternetGateway
+
+  # Attach Internet Gateway to VPC
+  DevAttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DevVPC
+      InternetGatewayId: !Ref DevInternetGateway
+
+  # Route Table for Public Access
+  DevRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DevVPC
+      Tags:
+        - Key: Name
+          Value: DevPublicRouteTable
+
+  # Route to Internet Gateway
+  DevRoute:
+    Type: AWS::EC2::Route
+    DependsOn: DevAttachGateway
+    Properties:
+      RouteTableId: !Ref DevRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref DevInternetGateway
+
+  # Associate Route Table with Subnet
+  DevRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DevSubnet
+      RouteTableId: !Ref DevRouteTable
+
+  # Security Group that allows SSH (port 22)
+  DevSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow SSH access and internet access"
+      VpcId: !Ref DevVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: "0.0.0,0/0"  # Allow SSH from myIp
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"  # Allow outbound access for SSM
+
+  # IAM Role to allow EC2 instance to communicate with SSM AND orchestrate EKS
+  DevSsmRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # Renamed for cleaner referencing (no more Fn::Join)
+      RoleName: !Sub "${AWS::Region}-CloudLabRole" 
+      
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      
+      # --- Managed Policies (For SSM, EKS, and general access) ---
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy     
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy  
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess        
+        - arn:aws:iam::aws:policy/AdministratorAccess        
+      
+      # --- Inline Policy (Revised to avoid legacy parsing errors) ---
+      Policies:
+        - PolicyName: EKSOrchestrationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # 1. General EKS, SSM, and PassRole permissions
+              - Effect: Allow
+                Action:
+                  - eks:*
+                  - ssm:GetParameter
+                  - iam:PassRole
+                Resource: "*"
+
+              # 2. IAM permissions for eksctl's IRSA setup
+              - Effect: Allow
+                Action:
+                  - iam:GetPolicy
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListAttachedRolePolicies
+                # Using !Sub for clean ARN construction
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/eksctl-*"
+
+              # 3. CloudFormation permissions for eksctl stack management
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DeleteStack
+                  - cloudformation:ListStacks
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                # Using !Sub for clean ARN construction
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/eksctl-*" 
+
+      Tags:
+        - Key: Name
+          Value: Dev-EKSOrchestrationRole
+
+  # Attach IAM Role to EC2 Instance
+  DevInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref DevSsmRole
+
+  # ALinux2023 EC2 Instance
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.medium
+      ImageId: ami-0157af9aea2eef346 # Amazon Linux 2023 AMI (us-east-1)
+      SecurityGroupIds:
+        - !Ref DevSecurityGroup
+      SubnetId: !Ref DevSubnet
+      KeyName: DevKey
+      IamInstanceProfile: !Ref DevInstanceProfile
+      Tags:
+        - Key: Name
+          Value: AL2023DockerInstance # update tag
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            
+            # Install Docker and start the service
+            sudo dnf update -y 
+            sudo dnf install -y docker
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            
+            # Add the default 'ec2-user' to the 'docker' group to run docker commands without sudo
+            # Note: The default user on AL2023 is 'ec2-user', not 'ubuntu'
+            sudo usermod -aG docker ec2-user
+            
+            
+            # Install zip and curl 
+            sudo dnf install -y unzip curl
+            
+            # Install Terraform 
+            sudo dnf install -y https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp-repo.noarch.rpm
+            sudo dnf install -y terraform
+
+            # Install NodeJS and npm
+            sudo dnf install -y nodejs
+            
+            # Install AWS CLI v2 (using the same steps as before, but with dnf/zip installed)
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -qq awscliv2.zip
+            sudo ./aws/install
+
+            # Install eksctl
+            echo "Installing eksctl..."
+            curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+
+            # Move the files
+            echo "Moving tmp Files..."
+            sudo mv /tmp/eksctl /usr/bin
+
+            # Install Kubectl
+            echo "Installing Kubectl"
+            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+            # Apply Permissions
+            echo "Applying Permissions..."
+            chmod +x ./kubectl
+
+            # Add Path variables
+            echo "Updating Path..."
+            mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$PATH:$HOME/bin 
+
+            # Install the latest Helm 3
+            echo "Installing the latest stable version of Helm 3..."
+            curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+            chmod 700 get_helm.sh
+            ./get_helm.sh
+
+            # Install Syft (for SBOM generation)
+            echo "Installing Syft..."
+            curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sudo sh -s -- -b /usr/local/bin
+
+            # Install Grype (for vulnerability scanning)
+            echo "Installing Grype..."
+            curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sudo sh -s -- -b /usr/local/bin
+
+            # Install python3-pip and boto3
+            sudo dnf install -y python3-pip
+            pip3 install boto3
+            
+            # Exit command (ensures the script finishes)
+            exit 0
+
+Outputs:
+
+  InstanceId:
+    Description: "Instance ID"
+    Value: !Ref EC2Instance
+
+  VPCId:
+    Description: "VPC ID"
+    Value: !Ref DevVPC
+
+  SecurityGroupId:
+    Description: "Security Group ID"
+    Value: !Ref DevSecurityGroup
+

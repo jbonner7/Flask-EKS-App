@@ -1,0 +1,23 @@
+# k8s_manifests/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: flask-report-service
+  namespace: flask-app
+  annotations:
+    # 1. Ensure Load Balancer is internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    
+    # 2. 🚨 CRITICAL: RESTRICT ACCESS TO YOUR IP 🚨
+    service.beta.kubernetes.io/load-balancer-source-ranges: "" 
+    
+  labels:
+    app: flask-report
+spec:
+  selector:
+    app: flask-report
+  type: LoadBalancer 
+  ports:
+    - protocol: TCP
+      port: 80       
+      targetPort: 5000

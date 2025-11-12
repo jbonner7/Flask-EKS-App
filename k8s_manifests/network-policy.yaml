@@ -1,0 +1,45 @@
+# k8s_manifests/network-policy.yaml
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flask-report-policy
+  namespace: flask-app # Must match the namespace in deployment.yaml (CKV_K8S_21 fix)
+spec:
+  # 1. Selects the Pods this policy applies to (your Flask app)
+  podSelector:
+    matchLabels:
+      app: flask-report
+  
+  # 2. Defines what types of traffic are allowed (Ingress and Egress)
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # --- INGRESS (INBOUND) RULES ---
+  ingress:
+    # Rule 1: Allow internal traffic (from Kube-system components like health checks)
+    - from:
+      - namespaceSelector: {} # Allows traffic from all namespaces (useful for EKS CNI/Node communication)
+        # ⚠️ NOTE: In a strictly secured environment, you would restrict this to specific namespaces (e.g., kube-system)
+      
+    # Rule 2: Restrict Ingress Ports
+      ports:
+        - protocol: TCP
+          port: 5000 # Only allow traffic destined for the Flask container port (5000)
+
+  # --- EGRESS (OUTBOUND) RULES ---
+  # Default is DENY ALL. Only specific destinations are whitelisted below.
+  egress:
+    # Rule 1: Allow DNS Resolution (TCP and UDP on port 53)
+    # This is essential for EKS, AWS service endpoints, and pulling ECR images
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            k8s-app: kube-dns # Targets the DNS Pods (often labeled this way in EKS)
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+          
